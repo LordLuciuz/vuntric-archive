@@ -1,0 +1,21 @@
+# All user data is strictly local. Never publish it.
+.venv/
+data/
+backups/
+update_backups/
+exports/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.json.bak
+__pycache__/
+*.py[cod]
+.env
+.env.*
+update-config.json
+archive-version.json
+dist/
+*.zip
