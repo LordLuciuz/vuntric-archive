@@ -376,45 +376,293 @@ def render_dictionary(snapshot, language):
                         st.rerun()
 
 
-def render_categories(snapshot):
-    st.title("Semantic Categories")
-    st.caption("Hierarchical subject categories are shared across languages. A word may have multiple categories.")
+def category_lineage(category_id, categories):
+    """Return the ancestor chain, root first. Tolerates a stale/deleted category."""
+    by_id = {cat["id"]: cat for cat in categories}
+    trail = []
+    visited = set()
+    ident = category_id
+    while ident in by_id and ident not in visited:
+        visited.add(ident)
+        current = by_id[ident]
+        trail.append(current)
+        ident = current["parent_id"]
+    trail.reverse()
+    return trail
+
+
+def category_entry_count(entries, category_id, categories):
+    """Count distinct entries in this category or any nested category."""
+    subtree = category_descendants(category_id, categories)
+    return sum(bool(subtree.intersection(e["category_ids"])) for e in entries)
+
+
+def category_navigation(word_class_id=None, category_id=None):
+    """Navigate the category browser without changing any dictionary filters."""
+    st.session_state.page = "Categories"
+    st.session_state.categories_class_id = word_class_id
+    st.session_state.categories_node_id = category_id
+    st.session_state.pop("category_open_entry", None)
+    st.rerun()
+
+
+def render_category_cards(categories, entries, all_categories, key_prefix):
+    """Render direct child categories, ordered according to their stored order."""
+    if not categories:
+        return
+    ordered = sorted(categories, key=lambda c: (c["sort_order"], c["name"].casefold()))
+    for start in range(0, len(ordered), 3):
+        columns = st.columns(3)
+        for col, category in zip(columns, ordered[start:start + 3]):
+            count = category_entry_count(entries, category["id"], all_categories)
+            with col:
+                with st.container(border=True):
+                    st.markdown("#### " + category["name"])
+                    st.caption(f"{count} {'word' if count == 1 else 'words'} · includes subcategories")
+                    if st.button("Browse category →", key=f"{key_prefix}_{category['id']}", use_container_width=True):
+                        category_navigation(st.session_state.get("categories_class_id"), category["id"])
+
+
+def render_category_words(entries, classes, labels, category_id, categories):
+    """Show unique vocabulary records and a full reading panel inside the category."""
+    if category_id == "__uncategorized__":
+        shown = [entry for entry in entries if not entry["category_ids"]]
+    elif category_id in (None, "__all__"):
+        shown = list(entries)
+    else:
+        subtree = category_descendants(category_id, categories)
+        shown = [entry for entry in entries if subtree.intersection(entry["category_ids"])]
+
+    st.subheader("Vocabulary")
+    search_col, status_col = st.columns([3, 1])
+    with search_col:
+        search = st.text_input("Search words in this section", placeholder="Word, meaning, etymology…",
+                               key="category_words_search")
+    with status_col:
+        status = st.selectbox("Status", ["all", "established", "draft", "obsolete"],
+                              format_func=lambda x: "All statuses" if x == "all" else x.capitalize(),
+                              key="category_words_status")
+    if status != "all":
+        shown = [entry for entry in shown if entry["status"] == status]
+    if search.strip():
+        term = search.casefold().strip()
+        shown = [entry for entry in shown if term in " ".join([
+            entry["lemma"], entry["gloss"], entry["definition"], entry["ipa"],
+            entry["morphology"], entry["etymology"], entry["notes"]
+        ]).casefold()]
+    shown.sort(key=lambda e: (e["lemma"].casefold(), e["id"]))
+    st.caption(f"{len(shown)} matching {'word' if len(shown) == 1 else 'words'}")
+    if not shown:
+        st.info("No vocabulary entries match this selection.")
+        return
+
+    class_labels = {x["id"]: x["name"] for x in classes}
+    rows = [{"Word": e["lemma"], "Meaning": e["gloss"],
+             "Word class": class_labels.get(e["word_class_id"], "Unclassified"),
+             "Status": e["status"].capitalize()} for e in shown[:5000]]
+    st.dataframe(rows, use_container_width=True, hide_index=True,
+                 height=min(380, 70 + len(rows) * 36))
+    if len(shown) > 5000:
+        st.caption("Showing the first 5,000 entries. Use search to narrow the list.")
+    choices = [e["id"] for e in shown]
+    if st.session_state.get("category_open_entry") not in choices:
+        st.session_state.category_open_entry = choices[0]
+    chosen_id = st.selectbox("Read a dictionary entry", choices,
+                             format_func=lambda ident: next(
+                                 e["lemma"] + " — " + (e["gloss"] or "No gloss")
+                                 for e in shown if e["id"] == ident),
+                             key="category_open_entry")
+    selected = next(e for e in shown if e["id"] == chosen_id)
+    with st.container(border=True):
+        st.header(selected["lemma"])
+        metadata = [class_labels.get(selected["word_class_id"], "Unclassified"),
+                    selected["status"].capitalize()]
+        if selected["ipa"].strip():
+            metadata.insert(1, selected["ipa"])
+        st.caption(" · ".join(metadata))
+        if selected["gloss"].strip():
+            st.markdown("**" + selected["gloss"] + "**")
+        if selected["definition"].strip():
+            st.markdown(selected["definition"])
+        if selected["category_ids"]:
+            st.caption("Categories: " + "; ".join(labels.get(cid, cid) for cid in selected["category_ids"]))
+        for title, field in (("Morphology", "morphology"), ("Etymology", "etymology"),
+                             ("Notes & usage", "notes")):
+            if selected[field].strip():
+                st.markdown("#### " + title)
+                st.markdown(selected[field])
+        if st.button("Open in Dictionary / Edit entry", key="category_edit_" + chosen_id):
+            st.session_state.requested_entry_id = chosen_id
+            go("Dictionary", word_class=selected["word_class_id"], category="all", query="")
+
+
+def render_category_manager(categories, labels):
+    """Keep maintenance tools tucked away from the reading experience."""
+    with st.expander("⚙ Manage categories (add, rename or move)", expanded=False):
+        st.caption("Categories are shared across languages; changes here affect their navigation, not the words themselves.")
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Add category**")
+            with st.form("add_category"):
+                name = st.text_input("Name")
+                parent_choices = [None] + [x["id"] for x in categories]
+                parent = st.selectbox("Parent category", parent_choices,
+                                      format_func=lambda x: "Top-level category" if x is None else labels[x])
+                if st.form_submit_button("Create category", type="primary"):
+                    if not name.strip():
+                        st.warning("Name is required.")
+                    elif save("categories", {"name": name.strip(), "parent_id": parent,
+                                                  "sort_order": len(categories)}):
+                        st.rerun()
+        with right:
+            st.markdown("**Edit category**")
+            if categories:
+                with st.form("edit_category"):
+                    chosen_id = st.selectbox("Category", list(labels), format_func=lambda x: labels[x])
+                    chosen = next(x for x in categories if x["id"] == chosen_id)
+                    changed_name = st.text_input("Rename", value=chosen["name"])
+                    parent_choices = [None] + [x["id"] for x in categories if x["id"] != chosen_id]
+                    idx = parent_choices.index(chosen["parent_id"]) if chosen["parent_id"] in parent_choices else 0
+                    new_parent = st.selectbox("Move beneath", parent_choices, index=idx,
+                                              format_func=lambda x: "Top-level category" if x is None else labels[x])
+                    if st.form_submit_button("Save category"):
+                        if not changed_name.strip():
+                            st.warning("Name is required.")
+                        elif not db.can_set_parent(chosen_id, new_parent, categories):
+                            st.error("A category cannot be placed beneath one of its descendants.")
+                        elif save("categories", {"name": changed_name.strip(), "parent_id": new_parent}, chosen_id):
+                            st.rerun()
+
+
+def render_categories(snapshot, language):
+    """Word-class landing pages -> semantic category pages -> vocabulary records."""
+    st.title("Categories")
+    st.caption("Browse the dictionary by word class and subject. Every word exists only once in the database.")
     categories = snapshot["categories"]
     labels = db.category_path_map(categories)
-    for ident, path in sorted(labels.items(),key=lambda x:x[1].casefold()):
-        st.text(path)
+    classes = sorted(snapshot["word_classes"], key=lambda c: (c["sort_order"], c["name"].casefold()))
+    class_by_id = {c["id"]: c for c in classes}
+    category_by_id = {c["id"]: c for c in categories}
+    language_entries = [e for e in snapshot["entries"] if e["language_id"] == language["id"]]
+
+    class_id = st.session_state.get("categories_class_id")
+    category_id = st.session_state.get("categories_node_id")
+    if class_id not in class_by_id:
+        class_id = None
+        st.session_state.categories_class_id = None
+    if category_id not in category_by_id and category_id not in (None, "__all__", "__uncategorized__"):
+        category_id = None
+        st.session_state.categories_node_id = None
+    if class_id is None and category_id in ("__all__", "__uncategorized__"):
+        category_id = None
+        st.session_state.categories_node_id = None
+    entries = ([e for e in language_entries if e["word_class_id"] == class_id]
+               if class_id else language_entries)
+
+    # The landing page is intentionally distinct from the old list of every category.
+    if class_id is None and category_id is None:
+        st.subheader("Word Classes")
+        st.caption("Choose a class to see its subject categories and vocabulary.")
+        for start in range(0, len(classes), 3):
+            cols = st.columns(3)
+            for col, word_class in zip(cols, classes[start:start + 3]):
+                count = sum(e["word_class_id"] == word_class["id"] for e in language_entries)
+                with col:
+                    with st.container(border=True):
+                        st.markdown("#### " + word_class["name"])
+                        st.caption(f"{count} {'word' if count == 1 else 'words'}")
+                        if st.button("Browse →", key="category_class_" + word_class["id"], use_container_width=True):
+                            category_navigation(word_class["id"])
+        search = st.text_input("Quick search across subjects or words", key="category_global_search",
+                               placeholder="e.g. weapons, geography, Rôs…")
+        if search.strip():
+            term = search.casefold().strip()
+            matching_categories = [c for c in categories if term in labels[c["id"]].casefold()]
+            matching_entries = [e for e in language_entries if term in " ".join([
+                e["lemma"], e["gloss"], e["definition"], e["notes"]]).casefold()]
+            if matching_categories:
+                st.markdown("**Matching subject categories**")
+                for cat in matching_categories[:15]:
+                    if st.button(labels[cat["id"]] + " →", key="cat_search_" + cat["id"]):
+                        category_navigation(None, cat["id"])
+            if matching_entries:
+                st.markdown("**Matching dictionary entries**")
+                for e in matching_entries[:15]:
+                    if st.button(e["lemma"] + " — " + (e["gloss"] or "No gloss"), key="entry_search_" + e["id"]):
+                        st.session_state.requested_entry_id = e["id"]
+                        go("Dictionary", word_class=e["word_class_id"], category="all", query="")
+            if not matching_categories and not matching_entries:
+                st.info("No matching subjects or words.")
+        st.divider()
+        render_category_manager(categories, labels)
+        return
+
+    # Breadcrumb buttons act as navigation, even for deeply nested categories.
+    breadcrumbs = st.columns([2, 2, 2, 2, 2])
+    with breadcrumbs[0]:
+        if st.button("‹ All classes", use_container_width=True, key="cat_breadcrumb_root"):
+            category_navigation()
+    if class_id:
+        with breadcrumbs[1]:
+            if st.button("‹ " + class_by_id[class_id]["name"], key="cat_breadcrumb_class", use_container_width=True):
+                category_navigation(class_id)
+
+    if category_id in (None, "__all__", "__uncategorized__"):
+        title = class_by_id[class_id]["name"] if class_id else "All classes"
+        if category_id == "__all__":
+            st.header("All " + title.lower())
+        elif category_id == "__uncategorized__":
+            st.header(title + " · Uncategorized")
+        else:
+            st.header(title)
+        if category_id is None:
+            st.caption("Select a subject to explore its subdivisions. Counts include words within nested subjects.")
+            roots = [c for c in categories if c["parent_id"] is None]
+            show_empty = st.checkbox("Show empty categories", key="show_empty_root")
+            visible = roots if show_empty else [c for c in roots if category_entry_count(entries, c["id"], categories)]
+            if visible:
+                render_category_cards(visible, entries, categories, "category_root_card")
+            else:
+                st.info("No categorized words yet. You can show empty categories or add a word in Dictionary.")
+            st.divider()
+            a, b = st.columns(2)
+            with a:
+                if st.button(f"Browse all {title.lower()} ({len(entries)})", use_container_width=True):
+                    category_navigation(class_id, "__all__")
+            uncategorized = sum(not e["category_ids"] for e in entries)
+            with b:
+                if st.button(f"Uncategorized ({uncategorized})", use_container_width=True):
+                    category_navigation(class_id, "__uncategorized__")
+        else:
+            render_category_words(entries, classes, labels, category_id, categories)
+    else:
+        chain = category_lineage(category_id, categories)
+        category = category_by_id[category_id]
+        st.header(category["name"])
+        st.caption(" › ".join(c["name"] for c in chain))
+        # Every ancestor is a clickable breadcrumb, including deep nesting.
+        ancestors = chain[:-1]
+        for start in range(0, len(ancestors), 4):
+            row = st.columns(len(ancestors[start:start + 4]))
+            for col, ancestor in zip(row, ancestors[start:start + 4]):
+                with col:
+                    if st.button("‹ " + ancestor["name"],
+                                 key="cat_ancestor_" + ancestor["id"], use_container_width=True):
+                        category_navigation(class_id, ancestor["id"])
+        children = [c for c in categories if c["parent_id"] == category_id]
+        if children:
+            st.subheader("Subcategories")
+            show_empty = st.checkbox("Show empty subcategories", key="show_empty_subcategory")
+            visible = children if show_empty else [c for c in children if category_entry_count(entries, c["id"], categories)]
+            if visible:
+                render_category_cards(visible, entries, categories, "category_child_card")
+            else:
+                st.caption("No subcategories have words yet. Enable 'Show empty subcategories' to browse them.")
+        st.divider()
+        render_category_words(entries, classes, labels, category_id, categories)
+
     st.divider()
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Add category")
-        with st.form("add_category"):
-            name = st.text_input("Name")
-            parent_choices = [None]+[x["id"] for x in categories]
-            parent = st.selectbox("Parent category", parent_choices,
-                                  format_func=lambda x:"Top-level category" if x is None else labels[x])
-            if st.form_submit_button("Create category",type="primary"):
-                if not name.strip():
-                    st.warning("Name is required.")
-                elif save("categories",{"name":name.strip(),"parent_id":parent,"sort_order":len(categories)}):
-                    st.rerun()
-    with right:
-        st.subheader("Edit category")
-        if categories:
-            with st.form("edit_category"):
-                chosen_id = st.selectbox("Category",list(labels),format_func=lambda x:labels[x])
-                chosen = next(x for x in categories if x["id"]==chosen_id)
-                changed_name = st.text_input("Rename", value=chosen["name"])
-                parent_choices = [None]+[x["id"] for x in categories if x["id"] != chosen_id]
-                idx = parent_choices.index(chosen["parent_id"]) if chosen["parent_id"] in parent_choices else 0
-                new_parent = st.selectbox("Move beneath",parent_choices,index=idx,
-                                          format_func=lambda x:"Top-level category" if x is None else labels[x])
-                if st.form_submit_button("Save category"):
-                    if not changed_name.strip():
-                        st.warning("Name is required.")
-                    elif not db.can_set_parent(chosen_id,new_parent,categories):
-                        st.error("A category cannot be placed beneath one of its descendants.")
-                    elif save("categories", {"name":changed_name.strip(),"parent_id":new_parent},chosen_id):
-                        st.rerun()
+    render_category_manager(categories, labels)
 
 
 def render_languages(snapshot, language):
@@ -549,7 +797,7 @@ elif page == "Language Foundations":
 elif page == "Dictionary":
     render_dictionary(snapshot,language)
 elif page == "Categories":
-    render_categories(snapshot)
+    render_categories(snapshot,language)
 elif page == "Languages":
     render_languages(snapshot,language)
 elif page == "Import / Export":
