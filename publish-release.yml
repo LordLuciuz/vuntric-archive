@@ -1,0 +1,47 @@
+name: Publish Vuntric Archive update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - app.py
+      - storage.py
+      - archive_updater.py
+      - requirements.txt
+      - modules/**
+      - tools/build_release.py
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Create package if version not yet published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be like 0.1.3"
+            exit 1
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists; no changes published."
+            exit 0
+          fi
+          python tools/build_release.py "$VERSION"
+          gh release create "v$VERSION" "dist/VuntricArchive_Update_$VERSION.zip" \
+            --target "$GITHUB_SHA" \
+            --title "Vûntric Archive v$VERSION" \
+            --notes "Application-only update. Does not include or modify local language data."
