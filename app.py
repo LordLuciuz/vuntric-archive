@@ -246,10 +246,11 @@ def category_descendants(category_id, categories):
 
 
 def render_verb_morphology(content, lemma):
-    """Display an existing four-person verb paradigm as a readable table.
+    """Present every established Vûntlû verb form without changing stored data.
 
-    This is presentation only: neither the grammar nor the stored forms change.
-    Unknown or differently structured paradigms fall back to the raw notes.
+    Simple finite forms and the participle come directly from the entry.
+    Compound forms follow the canonical Êgîr / Skulîr auxiliary paradigms.
+    Unknown entry formats fall back to the original morphology.
     """
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if (len(lines) != 4
@@ -262,32 +263,68 @@ def render_verb_morphology(content, lemma):
     def forms(line):
         if "):" not in line:
             return []
-        values = line.split("):", 1)[1].strip().rstrip(".").split(" / ")
-        return [value.strip() for value in values]
+        return [value.strip() for value in
+                line.split("):", 1)[1].strip().rstrip(".").split(" / ")]
 
     present = forms(lines[1])
     past = forms(lines[2])
-    if len(present) != 4 or len(past) != 4 or not all(present + past):
+    participle = lines[3].split(":", 1)[1].strip()
+    participle_form = participle.split(" (", 1)[0].rstrip(".").strip()
+    if (len(present) != 4 or len(past) != 4
+            or not all(present + past) or not participle_form):
         return False
 
-    st.markdown(f"**Infinitive:** {lemma}")
-    details = lines[0][len(f"Infinitive: {lemma}."):].strip()
-    if details:
-        st.caption(details)
-
-    st.markdown("**Finite conjugation**")
     subjects = (
         "Ek — I",
         "Thû — you (singular)",
         "Is / Sî / En — he / she / it",
         "Wîs / Jûs / Thê — we / you (plural) / they",
     )
+    have_present = ("Êge", "Êges", "Êget", "Êgen")
+    have_past = ("Êgde", "Êgdes", "Êgde", "Êgden")
+    future = ("Skule", "Skules", "Skulet", "Skulen")
+
+    st.markdown(f"**Infinitive:** {lemma}")
+    details = lines[0][len(f"Infinitive: {lemma}."):].strip()
+    if details:
+        st.caption(details)
+
+    st.markdown("**Simple tenses**")
     st.table([
         {"Subject": subject, "Present": present[i], "Past": past[i]}
         for i, subject in enumerate(subjects)
     ])
-    participle = lines[3].split(":", 1)[1].strip()
+
+    st.markdown("**Perfect tenses**")
+    st.table([
+        {"Subject": subject,
+         "Perfect": f"{have_present[i]} {participle_form}",
+         "Past perfect": f"{have_past[i]} {participle_form}"}
+        for i, subject in enumerate(subjects)
+    ])
+
+    st.markdown("**Future tenses**")
+    st.table([
+        {"Subject": subject,
+         "Future": f"{future[i]} {lemma}",
+         "Future perfect": f"{future[i]} êgîr {participle_form}"}
+        for i, subject in enumerate(subjects)
+    ])
+
     st.markdown(f"**Past participle:** {participle}")
+
+    if lemma.endswith("îr"):
+        stem = lemma[:-2]
+        st.markdown("**Imperative mood**")
+        st.table([
+            {"Addressee": "Singular", "Command": f"{stem}!",
+             "Negative command": f"{stem} ne!"},
+            {"Addressee": "Plural", "Command": f"{stem}et!",
+             "Negative command": f"{stem}et ne!"},
+        ])
+    st.caption("Perfect and future forms are constructed using the established "
+               "auxiliaries Êgîr and Skulîr. Imperatives use the verb stem. "
+               "No passive, progressive, or subjunctive paradigm is assumed.")
     return True
 
 
