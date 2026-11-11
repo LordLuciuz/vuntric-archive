@@ -244,6 +244,38 @@ def category_descendants(category_id, categories):
     return descendants
 
 
+
+def render_entry_readonly(entry, class_label, category_labels):
+    """Reader-friendly entry display. Reserve status badges for exceptional states."""
+    st.header(entry["lemma"])
+    metadata = [class_label]
+    if entry["ipa"].strip():
+        metadata.append(entry["ipa"].strip())
+    if entry["status"] != "established":
+        metadata.append(entry["status"].capitalize())
+    st.caption(" · ".join(metadata))
+
+    gloss = entry["gloss"].strip()
+    definition = entry["definition"].strip()
+    if gloss:
+        st.markdown(f"**{gloss}**")
+    # Older entries may still have an identical gloss and definition. Don't echo it.
+    if definition and (not gloss or definition.casefold() != gloss.casefold()):
+        st.markdown(definition)
+
+    if entry["category_ids"]:
+        st.caption("Categories: " + "; ".join(
+            category_labels.get(category_id, category_id)
+            for category_id in entry["category_ids"]
+        ))
+    for heading, field in (("Morphology", "morphology"),
+                           ("Etymology", "etymology"),
+                           ("Notes & usage", "notes")):
+        content = entry[field].strip()
+        if content:
+            st.markdown("#### " + heading)
+            st.markdown(content)
+
 def render_dictionary(snapshot, language):
     requested = st.session_state.pop("requested_entry_id", None)
     if requested:
@@ -282,8 +314,13 @@ def render_dictionary(snapshot, language):
     if entries:
         visible = [{"Lemma":x["lemma"], "Meaning":x["gloss"],
                     "Class":class_labels.get(x["word_class_id"],""),
-                    "Categories":", ".join(category_names.get(cat,cat).split(" › ")[-1] for cat in x["category_ids"]),
-                    "Status":x["status"].capitalize()} for x in entries[:5000]]
+                    "Categories":", ".join(category_names.get(cat,cat).split(" › ")[-1]
+                                           for cat in x["category_ids"])}
+                   for x in entries[:5000]]
+        if any(x["status"] != "established" for x in entries[:5000]):
+            for row, record in zip(visible, entries[:5000]):
+                row["Status"] = (record["status"].capitalize()
+                                 if record["status"] != "established" else "")
         st.dataframe(visible, use_container_width=True, hide_index=True, height=min(340,70+len(visible)*36))
         if len(entries)>5000:
             st.info("Displaying the first 5,000 matching entries. Narrow your search for more.")
@@ -297,22 +334,9 @@ def render_dictionary(snapshot, language):
         read_tab, edit_tab = st.tabs(["📖 Read entry", "✏️ Edit entry"])
         with read_tab:
             with st.container(border=True):
-                st.header(selected["lemma"])
-                metadata = [class_labels.get(selected["word_class_id"], "Unclassified"), selected["status"].capitalize()]
-                if selected["ipa"].strip():
-                    metadata.insert(1, selected["ipa"])
-                st.caption(" · ".join(metadata))
-                if selected["gloss"].strip():
-                    st.markdown(f"**{selected['gloss']}**")
-                if selected["definition"].strip():
-                    st.markdown(selected["definition"])
-                if selected["category_ids"]:
-                    names = [category_names.get(cat,cat) for cat in selected["category_ids"]]
-                    st.caption("Categories: " + "; ".join(names))
-                for heading, field in (("Morphology", "morphology"), ("Etymology", "etymology"), ("Notes & usage", "notes")):
-                    if selected[field].strip():
-                        st.markdown("#### " + heading)
-                        st.markdown(selected[field])
+                render_entry_readonly(selected,
+                                      class_labels.get(selected["word_class_id"], "Unclassified"),
+                                      category_names)
         with edit_tab:
             with st.form("edit_entry_"+chosen_id):
                 a,b = st.columns(2)
@@ -458,8 +482,12 @@ def render_category_words(entries, classes, labels, category_id, categories):
 
     class_labels = {x["id"]: x["name"] for x in classes}
     rows = [{"Word": e["lemma"], "Meaning": e["gloss"],
-             "Word class": class_labels.get(e["word_class_id"], "Unclassified"),
-             "Status": e["status"].capitalize()} for e in shown[:5000]]
+             "Word class": class_labels.get(e["word_class_id"], "Unclassified")}
+            for e in shown[:5000]]
+    if any(e["status"] != "established" for e in shown[:5000]):
+        for row, record in zip(rows, shown[:5000]):
+            row["Status"] = (record["status"].capitalize()
+                             if record["status"] != "established" else "")
     st.dataframe(rows, use_container_width=True, hide_index=True,
                  height=min(380, 70 + len(rows) * 36))
     if len(shown) > 5000:
@@ -474,23 +502,9 @@ def render_category_words(entries, classes, labels, category_id, categories):
                              key="category_open_entry")
     selected = next(e for e in shown if e["id"] == chosen_id)
     with st.container(border=True):
-        st.header(selected["lemma"])
-        metadata = [class_labels.get(selected["word_class_id"], "Unclassified"),
-                    selected["status"].capitalize()]
-        if selected["ipa"].strip():
-            metadata.insert(1, selected["ipa"])
-        st.caption(" · ".join(metadata))
-        if selected["gloss"].strip():
-            st.markdown("**" + selected["gloss"] + "**")
-        if selected["definition"].strip():
-            st.markdown(selected["definition"])
-        if selected["category_ids"]:
-            st.caption("Categories: " + "; ".join(labels.get(cid, cid) for cid in selected["category_ids"]))
-        for title, field in (("Morphology", "morphology"), ("Etymology", "etymology"),
-                             ("Notes & usage", "notes")):
-            if selected[field].strip():
-                st.markdown("#### " + title)
-                st.markdown(selected[field])
+        render_entry_readonly(selected,
+                              class_labels.get(selected["word_class_id"], "Unclassified"),
+                              labels)
         if st.button("Open in Dictionary / Edit entry", key="category_edit_" + chosen_id):
             st.session_state.requested_entry_id = chosen_id
             go("Dictionary", word_class=selected["word_class_id"], category="all", query="")
