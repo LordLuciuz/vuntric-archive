@@ -245,6 +245,52 @@ def category_descendants(category_id, categories):
 
 
 
+def render_verb_morphology(content, lemma):
+    """Display an existing four-person verb paradigm as a readable table.
+
+    This is presentation only: neither the grammar nor the stored forms change.
+    Unknown or differently structured paradigms fall back to the raw notes.
+    """
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if (len(lines) != 4
+            or not lines[0].startswith(f"Infinitive: {lemma}.")
+            or not lines[1].startswith("Finite present (")
+            or not lines[2].startswith("Finite past (")
+            or not lines[3].startswith("Past participle:")):
+        return False
+
+    def forms(line):
+        if "):" not in line:
+            return []
+        values = line.split("):", 1)[1].strip().rstrip(".").split(" / ")
+        return [value.strip() for value in values]
+
+    present = forms(lines[1])
+    past = forms(lines[2])
+    if len(present) != 4 or len(past) != 4 or not all(present + past):
+        return False
+
+    st.markdown(f"**Infinitive:** {lemma}")
+    details = lines[0][len(f"Infinitive: {lemma}."):].strip()
+    if details:
+        st.caption(details)
+
+    st.markdown("**Finite conjugation**")
+    subjects = (
+        "Ek — I",
+        "Thû — you (singular)",
+        "Is / Sî / En — he / she / it",
+        "Wîs / Jûs / Thê — we / you (plural) / they",
+    )
+    st.table([
+        {"Subject": subject, "Present": present[i], "Past": past[i]}
+        for i, subject in enumerate(subjects)
+    ])
+    participle = lines[3].split(":", 1)[1].strip()
+    st.markdown(f"**Past participle:** {participle}")
+    return True
+
+
 def render_entry_readonly(entry, class_label, category_labels):
     """Reader-friendly entry display. Reserve status badges for exceptional states."""
     st.header(entry["lemma"])
@@ -274,7 +320,11 @@ def render_entry_readonly(entry, class_label, category_labels):
         content = entry[field].strip()
         if content:
             st.markdown("#### " + heading)
-            st.markdown(content)
+            if field == "morphology" and entry["word_class_id"] == "class-verb":
+                if not render_verb_morphology(content, entry["lemma"]):
+                    st.markdown(content.replace("\n", "\n\n"))
+            else:
+                st.markdown(content)
 
 def render_dictionary(snapshot, language):
     requested = st.session_state.pop("requested_entry_id", None)
